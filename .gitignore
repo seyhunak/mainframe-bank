@@ -1,0 +1,14 @@
+# Build artifacts
+build/
+
+# Generated datasets
+data/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*~
+.vscode/
+.idea/

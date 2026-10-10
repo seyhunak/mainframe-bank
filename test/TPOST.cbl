@@ -1,0 +1,367 @@
+>>SOURCE FORMAT FREE
+      *> ====================================================================
+      *> TPOST - Integration test for MBPOSTNG, the posting engine.
+      *>
+      *> Drives the engine the way the teller programs do, then re-reads the
+      *> datasets to confirm the balances, the journal and the audit trail
+      *> all agree. Expects the datasets produced by bin/LOADLIB.
+      *>
+      *> Accounts under test:
+      *>   1000100000  checking, opening 4820.15, overdraft limit 100.00
+      *>   2000100000  savings,  opening 15400.00, no overdraft allowed
+      *>   1000200000  checking of customer 2, funds the loan payment
+      *> ====================================================================
+IDENTIFICATION DIVISION.
+PROGRAM-ID. TPOST.
+
+ENVIRONMENT DIVISION.
+INPUT-OUTPUT SECTION.
+FILE-CONTROL.
+    SELECT ACCT-FILE ASSIGN TO "data/ACCTFILE"
+        ORGANIZATION IS INDEXED
+        ACCESS MODE IS RANDOM
+        RECORD KEY IS AC-NO
+        FILE STATUS IS FS-ACCT.
+    SELECT BAL-FILE ASSIGN TO "data/BALFILE"
+        ORGANIZATION IS INDEXED
+        ACCESS MODE IS RANDOM
+        RECORD KEY IS BA-NO
+        FILE STATUS IS FS-BAL.
+    SELECT LNBAL-FILE ASSIGN TO "data/LNBALFILE"
+        ORGANIZATION IS INDEXED
+        ACCESS MODE IS RANDOM
+        RECORD KEY IS LB-NO
+        FILE STATUS IS FS-LNBAL.
+    SELECT TXN-FILE ASSIGN TO "data/TXNFILE"
+        ORGANIZATION IS INDEXED
+        ACCESS MODE IS SEQUENTIAL
+        RECORD KEY IS TX-SEQ
+        FILE STATUS IS FS-TXN.
+    SELECT AUD-FILE ASSIGN TO "data/AUDFILE"
+        ORGANIZATION IS SEQUENTIAL
+        FILE STATUS IS FS-AUD.
+
+DATA DIVISION.
+FILE SECTION.
+FD  ACCT-FILE.
+COPY ACCTREC.
+FD  BAL-FILE.
+COPY BALREC.
+FD  LNBAL-FILE.
+COPY LNBALREC.
+FD  TXN-FILE.
+COPY TXNREC.
+FD  AUD-FILE.
+COPY AUDREC.
+
+WORKING-STORAGE SECTION.
+COPY BANKCON.
+COPY POSTCOMM.
+
+01  FS-ACCT   PIC XX.
+01  FS-BAL    PIC XX.
+01  FS-LNBAL  PIC XX.
+01  FS-TXN    PIC XX.
+01  FS-AUD    PIC XX.
+
+01  PASS-N    PIC 99 COMP VALUE 0.
+01  FAIL-N    PIC 99 COMP VALUE 0.
+01  LBL       PIC X(46).
+01  EXPED     PIC S9(13)V99 COMP-3.
+01  GOTBAL    PIC S9(13)V99 COMP-3.
+01  BALED     PIC -Z(11)9.99.
+01  EXPED-ED  PIC -Z(11)9.99.
+01  NJOUR     PIC 9(6) COMP VALUE 0.
+01  NAUD      PIC 9(6) COMP VALUE 0.
+01  W-EOF     PIC X VALUE "N".
+01  W-CHK     PIC X(10).
+01  CHK-A     PIC X(10).
+01  CHK-S     PIC X(10).
+01  CHK-L     PIC X(10).
+01  LN-PRIN   PIC S9(13)V99 COMP-3.
+
+PROCEDURE DIVISION.
+MAIN.
+    MOVE "1000100000" TO CHK-A
+    MOVE "2000100000" TO CHK-S
+    MOVE "1000200000" TO CHK-L
+    DISPLAY " "
+    DISPLAY "  MBPOSTNG INTEGRATION TEST"
+    DISPLAY " "
+    PERFORM COUNT-FILES
+    DISPLAY "  starting journal=" NJOUR "  audit=" NAUD
+
+      *> --- deposit ----------------------------------------------------
+    MOVE CHK-A TO PR-ACCT
+    MOVE 1000 TO PR-AMOUNT
+    MOVE TT-DEP TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "DEPOSIT 1000.00 ACCEPTED" TO LBL
+    PERFORM WANT-RC-ZERO
+    MOVE 5820.15 TO EXPED
+    MOVE "DEPOSIT LEAVES 5820.15" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- withdrawal -------------------------------------------------
+    MOVE 200 TO PR-AMOUNT
+    MOVE TT-WDL TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "WITHDRAWAL 200.00 ACCEPTED" TO LBL
+    PERFORM WANT-RC-ZERO
+    MOVE 5620.15 TO EXPED
+    MOVE "WITHDRAWAL LEAVES 5620.15" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- transfer savings -> checking --------------------------------
+    MOVE CHK-A TO PR-ACCT
+    MOVE CHK-S TO PR-ACCT2
+    MOVE 500 TO PR-AMOUNT
+    MOVE TT-XFR TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "TRANSFER 500.00 POSTS BOTH LEGS (CHK -> SAV)" TO LBL
+    IF PY-RC = 0 AND PY-POSTED = 2
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL "  rc=" PY-RC " legs=" PY-POSTED " " PY-MSG
+    END-IF
+    MOVE 5120.15 TO EXPED
+    MOVE "TRANSFER DEBITED CHECKING = 5120.15" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+    MOVE 15900 TO EXPED
+    MOVE "TRANSFER CREDITED SAVINGS = 15900.00" TO LBL
+    MOVE CHK-S TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- overdraft inside the limit ----------------------------------
+    MOVE CHK-A TO PR-ACCT
+    MOVE 5000 TO PR-AMOUNT
+    MOVE TT-WDL TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "WITHDRAWAL 5000.00 ACCEPTED" TO LBL
+    PERFORM WANT-RC-ZERO
+    MOVE 120.15 TO EXPED
+    MOVE "WITHDRAWAL LEAVES 120.15" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+
+    MOVE 200 TO PR-AMOUNT
+    MOVE TT-WDL TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "WITHDRAWAL TO -79.85 WITHIN LIMIT" TO LBL
+    PERFORM WANT-RC-ZERO
+    MOVE -79.85 TO EXPED
+    MOVE "OVERDRAFT RUN 2 LEAVES -79.85" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- beyond the limit: item returned ------------------------------
+    MOVE 500 TO PR-AMOUNT
+    MOVE TT-WDL TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "WITHDRAWAL BEYOND LIMIT RETURNS ITEM" TO LBL
+    MOVE 8 TO EXPED
+    PERFORM WANT-RC
+    MOVE 25 TO EXPED
+    MOVE "NSF CHARGE OF 25.00 ASSESSED" TO LBL
+    IF PY-FEE-CHG = EXPED
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL "  charge=" PY-FEE-CHG
+    END-IF
+    MOVE -79.85 TO EXPED
+    MOVE "RETURNED ITEM LEAVES BALANCE UNTOUCHED" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- savings may never overdraw ----------------------------------
+    MOVE CHK-S TO PR-ACCT
+    MOVE 20000 TO PR-AMOUNT
+    MOVE TT-WDL TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "SAVINGS WITHDRAWAL BEYOND FUNDS RETURNS" TO LBL
+    MOVE 8 TO EXPED
+    PERFORM WANT-RC
+    MOVE 15900 TO EXPED
+    MOVE "SAVINGS BALANCE UNCHANGED BY RETURN" TO LBL
+    MOVE CHK-S TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- unknown account ---------------------------------------------
+    MOVE "9999999999" TO PR-ACCT
+    MOVE 10 TO PR-AMOUNT
+    MOVE TT-DEP TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "DEPOSIT TO UNKNOWN ACCOUNT REJECTED" TO LBL
+    MOVE 4 TO EXPED
+    PERFORM WANT-RC
+
+      *> --- blocked transfer leaves nothing behind -----------------------
+    MOVE CHK-A TO PR-ACCT
+    MOVE CHK-S TO PR-ACCT2
+    MOVE 99999999 TO PR-AMOUNT
+    MOVE TT-XFR TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "TRANSFER BEYOND FUNDS REJECTED" TO LBL
+    MOVE 8 TO EXPED
+    PERFORM WANT-RC
+    MOVE -79.85 TO EXPED
+    MOVE "REJECTED TRANSFER LEFT SOURCE UNTOUCHED" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+    MOVE 15900 TO EXPED
+    MOVE "REJECTED TRANSFER LEFT TARGET UNTOUCHED" TO LBL
+    MOVE CHK-S TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- transfer to the same account ----------------------------------
+    MOVE CHK-A TO PR-ACCT
+    MOVE CHK-A TO PR-ACCT2
+    MOVE 10 TO PR-AMOUNT
+    MOVE TT-XFR TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "SELF TRANSFER REJECTED" TO LBL
+    MOVE 48 TO EXPED
+    PERFORM WANT-RC
+
+      *> --- zero and negative amounts -------------------------------------
+    MOVE CHK-A TO PR-ACCT
+    MOVE 0 TO PR-AMOUNT
+    MOVE TT-DEP TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "ZERO AMOUNT DEPOSIT REJECTED" TO LBL
+    MOVE 12 TO EXPED
+    PERFORM WANT-RC
+    MOVE -79.85 TO EXPED
+    MOVE "REJECTED AMOUNT DID NOT MOVE THE LEDGER" TO LBL
+    MOVE CHK-A TO W-CHK
+    PERFORM CHK-BAL
+
+      *> --- loan payment ---------------------------------------------------
+    MOVE CHK-L TO PR-ACCT
+    MOVE "L00000000001" TO PR-LOANNO
+    MOVE 530.42 TO PR-AMOUNT
+    MOVE TT-LOANPM TO PR-TYPE
+    PERFORM DO-POST
+    MOVE "LOAN PAYMENT ACCEPTED" TO LBL
+    PERFORM WANT-RC-ZERO
+    DISPLAY "    loan split reported: " PY-MSG
+    MOVE 744.58 TO EXPED
+    MOVE "LOAN PAYMENT DEBITED 530.42 FROM 1275.00" TO LBL
+    MOVE CHK-L TO W-CHK
+    PERFORM CHK-BAL
+      *> interest accrued but unpaid is taken first, then principal
+    MOVE "L00000000001" TO LB-NO
+    OPEN INPUT LNBAL-FILE
+    READ LNBAL-FILE
+    CLOSE LNBAL-FILE
+    IF FS-LNBAL = "00"
+        MOVE LB-CUR-PRIN TO LN-PRIN
+    ELSE
+        MOVE 0 TO LN-PRIN
+    END-IF
+    MOVE 25814.58 TO EXPED
+    MOVE "PRINCIPAL 26200 LESS 145 INTEREST THEN 385.42" TO LBL
+    IF LN-PRIN = EXPED
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL "  got=" LN-PRIN " want=" EXPED
+    END-IF
+    MOVE "ACCRUED INTEREST FULLY DISCHARGED" TO LBL
+    IF LN-PRIN = EXPED
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+    END-IF
+
+      *> --- journal and audit trail ---------------------------------------
+    PERFORM COUNT-FILES
+    DISPLAY "  ending   journal=" NJOUR "  audit=" NAUD
+    MOVE "JOURNAL GREW FOR EVERY POSTING" TO LBL
+    IF NJOUR >= 7
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL "  only " NJOUR " entries"
+    END-IF
+    MOVE "AUDIT GREW FOR EVERY POSTING" TO LBL
+    IF NAUD >= NJOUR
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL "  journal=" NJOUR " audit=" NAUD
+    END-IF
+    DISPLAY " "
+    DISPLAY " MBPOSTNG TESTS  PASS=" PASS-N "  FAIL=" FAIL-N
+    GOBACK.
+
+DO-POST.
+    CALL "MBPOSTNG" USING POSTCOMM.
+
+WANT-RC-ZERO.
+    IF PY-RC = 0
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL "  rc=" PY-RC " " PY-MSG
+    END-IF.
+
+WANT-RC.
+    IF PY-RC = EXPED
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL "  rc=" PY-RC " want " EXPED " " PY-MSG
+    END-IF.
+
+CHK-BAL.
+    MOVE W-CHK TO BA-NO
+    OPEN INPUT BAL-FILE
+    READ BAL-FILE
+    CLOSE BAL-FILE
+    IF FS-BAL NOT = "00"
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL cannot read balance for " W-CHK " fs=" FS-BAL
+        EXIT PARAGRAPH
+    END-IF
+    MOVE BA-AVAIL TO GOTBAL
+    MOVE GOTBAL TO BALED
+    MOVE EXPED TO EXPED-ED
+    IF GOTBAL = EXPED
+        ADD 1 TO PASS-N
+    ELSE
+        ADD 1 TO FAIL-N
+        DISPLAY " FAIL " LBL
+        DISPLAY "      got [" BALED "] want [" EXPED-ED "]"
+    END-IF.
+
+COUNT-FILES.
+    MOVE 0 TO NAUD
+    MOVE 0 TO NJOUR
+    MOVE "N" TO W-EOF
+    OPEN INPUT TXN-FILE
+    PERFORM UNTIL W-EOF = "Y"
+        READ TXN-FILE
+            AT END
+                MOVE "Y" TO W-EOF
+            NOT AT END
+                ADD 1 TO NJOUR
+        END-READ
+    END-PERFORM
+    CLOSE TXN-FILE
+    MOVE "N" TO W-EOF
+    OPEN INPUT AUD-FILE
+    PERFORM UNTIL W-EOF = "Y"
+        READ AUD-FILE
+            AT END
+                MOVE "Y" TO W-EOF
+            NOT AT END
+                ADD 1 TO NAUD
+        END-READ
+    END-PERFORM
+    CLOSE AUD-FILE.
